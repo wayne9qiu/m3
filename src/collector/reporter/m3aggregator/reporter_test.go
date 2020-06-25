@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Uber Technologies, Inc.
+// Copyright (c) 2020 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -148,20 +148,32 @@ var (
 		},
 	}
 
-	testMatchResult = rules.NewMatchResult(0, math.MaxInt64,
+	testMatchResult = rules.NewMatchResult(
+		0,
+		math.MaxInt64,
 		testMatchForExistingID,
-		testMatchForNewRollupIDs)
+		testMatchForNewRollupIDs,
+		false,
+	)
 
-	testMatchDropPolicyAppliedResult = rules.NewMatchResult(0, math.MaxInt64,
+	testMatchDropPolicyAppliedResult = rules.NewMatchResult(
+		0,
+		math.MaxInt64,
 		metadata.StagedMetadatas{metadata.StagedMetadata{
 			Metadata:     metadata.DropMetadata,
 			CutoverNanos: testNow.UnixNano() / 2,
 		}},
-		testMatchForNewRollupIDs)
+		testMatchForNewRollupIDs,
+		false,
+	)
 
-	testMatchDropPolicyNotYetEffectiveResult = rules.NewMatchResult(0, math.MaxInt64,
+	testMatchDropPolicyNotYetEffectiveResult = rules.NewMatchResult(
+		0,
+		math.MaxInt64,
 		testMatchForExistingID,
-		testMatchForNewRollupIDs)
+		testMatchForNewRollupIDs,
+		false,
+	)
 )
 
 func TestReporterReportCounter(t *testing.T) {
@@ -175,11 +187,18 @@ func TestReporterReportCounter(t *testing.T) {
 		errReportCounter = errors.New("test report counter error")
 		actual           []unaggregated.CounterWithMetadatas
 	)
-	mockID := id.NewMockID(ctrl)
-	mockID.EXPECT().Bytes().Return([]byte("testCounter"))
+
+	matchedID := id.NewMockID(ctrl)
+	matchedID.EXPECT().Bytes().Return([]byte("testCounter"))
+
+	unmatchedID := id.NewMockID(ctrl)
+	unmatchedID.EXPECT().Bytes().Return([]byte("hello"))
+
 	mockMatcher := matcher.NewMockMatcher(ctrl)
-	mockMatcher.EXPECT().ForwardMatch(mockID, testFromNanos, testToNanos).Return(testMatchResult)
+	mockMatcher.EXPECT().ForwardMatch(matchedID, testFromNanos, testToNanos).Return(testMatchResult)
+	mockMatcher.EXPECT().ForwardMatch(unmatchedID, testFromNanos, testToNanos).Return(rules.EmptyMatchResult)
 	mockMatcher.EXPECT().Close().Return(nil).AnyTimes()
+
 	mockClient := client.NewMockClient(ctrl)
 	mockClient.EXPECT().
 		WriteUntimedCounter(gomock.Any(), gomock.Any()).
@@ -193,8 +212,13 @@ func TestReporterReportCounter(t *testing.T) {
 	mockClient.EXPECT().Close().Return(nil).AnyTimes()
 	reporter := NewReporter(mockMatcher, mockClient, testReporterOptions)
 	defer reporter.Close()
-	err := reporter.ReportCounter(mockID, 1234)
+
+	err := reporter.ReportCounter(matchedID, 1234)
 	require.Error(t, err)
+
+	err = reporter.ReportCounter(unmatchedID, 1234)
+	require.Error(t, err)
+
 	require.True(t, strings.Contains(err.Error(), errReportCounter.Error()))
 
 	expected := []unaggregated.CounterWithMetadatas{
@@ -248,8 +272,15 @@ func TestReporterReportCounter(t *testing.T) {
 			},
 			StagedMetadatas: metadata.DefaultStagedMetadatas,
 		},
+		{
+			Counter: unaggregated.Counter{
+				ID:    []byte("hello"),
+				Value: 1234,
+			},
+			StagedMetadatas: metadata.DefaultStagedMetadatas,
+		},
 	}
-	require.Equal(t, expected, actual)
+	require.Equal(t, expected[1:], actual)
 }
 
 func TestReporterReportBatchTimer(t *testing.T) {
@@ -263,11 +294,18 @@ func TestReporterReportBatchTimer(t *testing.T) {
 		errReportBatchTimer = errors.New("test report batch timer error")
 		actual              []unaggregated.BatchTimerWithMetadatas
 	)
-	mockID := id.NewMockID(ctrl)
-	mockID.EXPECT().Bytes().Return([]byte("testBatchTimer"))
+
+	matchedID := id.NewMockID(ctrl)
+	matchedID.EXPECT().Bytes().Return([]byte("testBatchTimer"))
+
+	unmatchedID := id.NewMockID(ctrl)
+	unmatchedID.EXPECT().Bytes().Return([]byte("hello"))
+
 	mockMatcher := matcher.NewMockMatcher(ctrl)
-	mockMatcher.EXPECT().ForwardMatch(mockID, testFromNanos, testToNanos).Return(testMatchResult)
+	mockMatcher.EXPECT().ForwardMatch(matchedID, testFromNanos, testToNanos).Return(testMatchResult)
+	mockMatcher.EXPECT().ForwardMatch(unmatchedID, testFromNanos, testToNanos).Return(rules.EmptyMatchResult)
 	mockMatcher.EXPECT().Close().Return(nil).AnyTimes()
+
 	mockClient := client.NewMockClient(ctrl)
 	mockClient.EXPECT().
 		WriteUntimedBatchTimer(gomock.Any(), gomock.Any()).
@@ -284,10 +322,16 @@ func TestReporterReportBatchTimer(t *testing.T) {
 			}).
 		MinTimes(1)
 	mockClient.EXPECT().Close().Return(nil).AnyTimes()
+
 	reporter := NewReporter(mockMatcher, mockClient, testReporterOptions)
 	defer reporter.Close()
-	err := reporter.ReportBatchTimer(mockID, []float64{1.3, 2.4})
+
+	err := reporter.ReportBatchTimer(matchedID, []float64{1.3, 2.4})
 	require.Error(t, err)
+
+	err = reporter.ReportBatchTimer(unmatchedID, []float64{1.3, 2.4})
+	require.Error(t, err)
+
 	require.True(t, strings.Contains(err.Error(), errReportBatchTimer.Error()))
 
 	expected := []unaggregated.BatchTimerWithMetadatas{
@@ -341,8 +385,15 @@ func TestReporterReportBatchTimer(t *testing.T) {
 			},
 			StagedMetadatas: metadata.DefaultStagedMetadatas,
 		},
+		{
+			BatchTimer: unaggregated.BatchTimer{
+				ID:     []byte("hello"),
+				Values: []float64{1.3, 2.4},
+			},
+			StagedMetadatas: metadata.DefaultStagedMetadatas,
+		},
 	}
-	require.Equal(t, expected, actual)
+	require.Equal(t, expected[1:], actual)
 }
 
 func TestReporterReportGauge(t *testing.T) {
@@ -356,11 +407,18 @@ func TestReporterReportGauge(t *testing.T) {
 		errReportCounter = errors.New("test report gauge error")
 		actual           []unaggregated.GaugeWithMetadatas
 	)
-	mockID := id.NewMockID(ctrl)
-	mockID.EXPECT().Bytes().Return([]byte("testCounter"))
+
+	matchedID := id.NewMockID(ctrl)
+	matchedID.EXPECT().Bytes().Return([]byte("testCounter"))
+
+	unmatchedID := id.NewMockID(ctrl)
+	unmatchedID.EXPECT().Bytes().Return([]byte("hello"))
+
 	mockMatcher := matcher.NewMockMatcher(ctrl)
-	mockMatcher.EXPECT().ForwardMatch(mockID, testFromNanos, testToNanos).Return(testMatchResult)
+	mockMatcher.EXPECT().ForwardMatch(matchedID, testFromNanos, testToNanos).Return(testMatchResult)
+	mockMatcher.EXPECT().ForwardMatch(unmatchedID, testFromNanos, testToNanos).Return(rules.EmptyMatchResult)
 	mockMatcher.EXPECT().Close().Return(nil).AnyTimes()
+
 	mockClient := client.NewMockClient(ctrl)
 	mockClient.EXPECT().
 		WriteUntimedGauge(gomock.Any(), gomock.Any()).
@@ -372,10 +430,16 @@ func TestReporterReportGauge(t *testing.T) {
 			return errReportCounter
 		}).MinTimes(1)
 	mockClient.EXPECT().Close().Return(nil).AnyTimes()
+
 	reporter := NewReporter(mockMatcher, mockClient, testReporterOptions)
 	defer reporter.Close()
-	err := reporter.ReportGauge(mockID, 1.8)
+
+	err := reporter.ReportGauge(matchedID, 1.8)
 	require.Error(t, err)
+
+	err = reporter.ReportGauge(unmatchedID, 1.8)
+	require.Error(t, err)
+
 	require.True(t, strings.Contains(err.Error(), errReportCounter.Error()))
 
 	expected := []unaggregated.GaugeWithMetadatas{
@@ -429,8 +493,15 @@ func TestReporterReportGauge(t *testing.T) {
 			},
 			StagedMetadatas: metadata.DefaultStagedMetadatas,
 		},
+		{
+			Gauge: unaggregated.Gauge{
+				ID:    []byte("hello"),
+				Value: 1.8,
+			},
+			StagedMetadatas: metadata.DefaultStagedMetadatas,
+		},
 	}
-	require.Equal(t, expected, actual)
+	require.Equal(t, expected[1:], actual)
 }
 
 func TestReporterFlush(t *testing.T) {
@@ -758,5 +829,5 @@ func TestReporterReportCounterWithDropPolicyNotEffective(t *testing.T) {
 			StagedMetadatas: metadata.DefaultStagedMetadatas,
 		},
 	}
-	require.Equal(t, expected, actual)
+	require.Equal(t, expected[1:], actual)
 }
