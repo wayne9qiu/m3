@@ -498,6 +498,8 @@ func (b *dbBuffer) Tick(blockStates ShardBlockStateSnapshot, nsCtx namespace.Con
 			}
 		}
 
+		buckets.recordActiveEncoders()
+
 		// Once we've evicted all eligible buckets, we merge duplicate encoders
 		// in the remaining ones to try and reclaim memory.
 		merges, err := buckets.merge(WarmWrite, nsCtx)
@@ -1147,6 +1149,16 @@ func (b *BufferBucketVersions) mergeToStreams(ctx context.Context, opts streamsO
 	return res, nil
 }
 
+func (b *BufferBucketVersions) recordActiveEncoders() {
+	var numActiveEncoders int
+	for _, bucket := range b.buckets {
+		if bucket.version == writableBucketVersion {
+			numActiveEncoders += len(bucket.encoders)
+		}
+	}
+	b.opts.Stats().RecordEncodersPerBlock(numActiveEncoders)
+}
+
 type streamsOptions struct {
 	filterWriteType bool
 	writeType       WriteType
@@ -1257,12 +1269,12 @@ func (b *BufferBucket) write(
 		return err == nil, err
 	}
 
+	// Need a new encoder, we didn't find an encoder to write to.
 	maxEncoders := b.opts.RuntimeOptionsManager().Get().EncodersPerBlockLimit()
 	if len(b.encoders) >= maxEncoders {
 		return false, errTooManyEncoders
 	}
 
-	// Need a new encoder, we didn't find an encoder to write to
 	b.opts.Stats().IncCreatedEncoders()
 	bopts := b.opts.DatabaseBlockOptions()
 	blockSize := b.opts.RetentionOptions().BlockSize()
