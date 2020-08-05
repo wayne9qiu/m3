@@ -148,6 +148,9 @@ func (s *fileSystemSource) Read(
 	}
 	builder := result.NewIndexBuilder(segBuilder)
 
+	// Preload info file results so they can be used to bootstrap data filesets and data migrations
+	infoFilesByNamespace := s.loadInfoFiles(namespaces)
+
 	// NB(r): Perform all data bootstrapping first then index bootstrapping
 	// to more clearly deliniate which process is slower than the other.
 	nowFn := s.opts.ResultOptions().ClockOptions().NowFn()
@@ -164,7 +167,7 @@ func (s *fileSystemSource) Read(
 
 		r, err := s.read(bootstrapDataRunType, md, namespace.DataAccumulator,
 			namespace.DataRunOptions.ShardTimeRanges,
-			namespace.DataRunOptions.RunOptions, builder)
+			namespace.DataRunOptions.RunOptions, builder, infoFilesByNamespace)
 		if err != nil {
 			return bootstrap.NamespaceResults{}, err
 		}
@@ -194,7 +197,7 @@ func (s *fileSystemSource) Read(
 
 		r, err := s.read(bootstrapIndexRunType, md, namespace.DataAccumulator,
 			namespace.IndexRunOptions.ShardTimeRanges,
-			namespace.IndexRunOptions.RunOptions, builder)
+			namespace.IndexRunOptions.RunOptions, builder, infoFilesByNamespace)
 		if err != nil {
 			return bootstrap.NamespaceResults{}, err
 		}
@@ -240,6 +243,15 @@ func (s *fileSystemSource) shardAvailability(
 		namespace, shard, s.fsopts.InfoReaderBufferSize(), s.fsopts.DecodingOptions(),
 		persist.FileSetFlushType)
 
+	return s.shardAvailabilityWithInfoFiles(namespace, shard, targetRangesForShard, readInfoFilesResults)
+}
+
+func (s *fileSystemSource) shardAvailabilityWithInfoFiles(
+	namespace ident.ID,
+	shard uint32,
+	targetRangesForShard xtime.Ranges,
+	readInfoFilesResults []fs.ReadInfoFileResult,
+) xtime.Ranges {
 	tr := xtime.NewRanges()
 	for i := 0; i < len(readInfoFilesResults); i++ {
 		result := readInfoFilesResults[i]
@@ -677,6 +689,7 @@ func (s *fileSystemSource) read(
 	shardsTimeRanges result.ShardTimeRanges,
 	runOpts bootstrap.RunOptions,
 	builder *result.IndexBuilder,
+	infoFilesByNamespace map[namespace.Metadata]fs.InfoFileResultsPerShard,
 ) (*runResult, error) {
 	var (
 		seriesCachePolicy = s.opts.ResultOptions().SeriesCachePolicy()
@@ -701,7 +714,7 @@ func (s *fileSystemSource) read(
 		if seriesCachePolicy != series.CacheAll {
 			// Unless we're caching all series (or all series metadata) in memory, we
 			// return just the availability of the files we have.
-			return s.bootstrapDataRunResultFromAvailability(md, shardsTimeRanges), nil
+			return s.bootstrapDataRunResultFromAvailability(md, shardsTimeRanges, infoFilesByNamespace), nil
 		}
 	}
 
@@ -756,6 +769,7 @@ func (s *fileSystemSource) newReader() (fs.DataFileSetReader, error) {
 func (s *fileSystemSource) bootstrapDataRunResultFromAvailability(
 	md namespace.Metadata,
 	shardsTimeRanges result.ShardTimeRanges,
+	infoFilesByNamespace map[namespace.Metadata]fs.InfoFileResultsPerShard,
 ) *runResult {
 	runResult := newRunResult()
 	unfulfilled := runResult.data.Unfulfilled()
@@ -763,7 +777,7 @@ func (s *fileSystemSource) bootstrapDataRunResultFromAvailability(
 		if ranges.IsEmpty() {
 			continue
 		}
-		availability := s.shardAvailability(md.ID(), shard, ranges)
+		availability := s.shardAvailabilityWithInfoFiles(md.ID(), shard, ranges, infoFilesByNamespace[md][shard])
 		remaining := ranges.Clone()
 		remaining.RemoveRanges(availability)
 		if !remaining.IsEmpty() {
@@ -882,6 +896,26 @@ func (s *fileSystemSource) bootstrapFromIndexPersistedBlocks(
 	}
 
 	return res, nil
+}
+
+func (s *fileSystemSource) loadInfoFiles(
+	namespaces bootstrap.Namespaces,
+) map[namespace.Metadata]fs.InfoFileResultsPerShard {
+	infoFilesByNamespace := make(map[namespace.Metadata]fs.InfoFileResultsPerShard)
+
+	for _, elem := range namespaces.Namespaces.Iter() {
+		namespace := elem.Value()
+		shardTimeRanges := namespace.DataRunOptions.ShardTimeRanges
+		result := make(fs.InfoFileResultsPerShard, shardTimeRanges.Len())
+		for shard := range shardTimeRanges.Iter() {
+			result[shard] = fs.ReadInfoFiles(s.fsopts.FilePathPrefix(),
+				namespace.Metadata.ID(), shard, s.fsopts.InfoReaderBufferSize(), s.fsopts.DecodingOptions())
+		}
+
+		infoFilesByNamespace[namespace.Metadata] = result
+	}
+
+	return infoFilesByNamespace
 }
 
 type runResult struct {
